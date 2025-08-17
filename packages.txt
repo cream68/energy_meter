@@ -1,0 +1,6 @@
+tesseract-ocr
+tesseract-ocr-eng
+# add more languages if you use them, e.g.:
+# tesseract-ocr-deu
+# (Optional, helps OpenCV headless on some bases)
+libgl1

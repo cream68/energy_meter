@@ -22,8 +22,10 @@ from datetime import datetime, date
 from typing import Optional
 
 import plotly.graph_objects as go
+import cv2
 import pandas as pd
 import pillow_heif
+import numpy as np
 from PIL import Image, ExifTags, ImageOps
 import streamlit as st
 from streamlit_cropper import st_cropper
@@ -31,10 +33,18 @@ import json
 from pathlib import Path
 
 # OCR
-try:
-    import pytesseract
-except Exception:
-    pytesseract = None
+import shutil, pytesseract
+
+TES_BIN = shutil.which("tesseract") or "/usr/bin/tesseract"
+pytesseract.pytesseract.tesseract_cmd = TES_BIN
+
+# Optional: show status in the UI
+def tesseract_status():
+    try:
+        v = pytesseract.get_tesseract_version()
+        return f"Tesseract OK: {TES_BIN} (v{v})"
+    except Exception as e:
+        return f"Tesseract not available: {e}"
 
 APP_TITLE = "Energy Meter"
 DATA_DIR = "data"
@@ -79,6 +89,17 @@ def to_norm_payload(box_dict: dict, img_w: int, img_h: int) -> dict:
         "w": width / img_w,
         "h": height / img_h,
     }
+
+def preprocess_for_ocr(pil_img):
+    # Convert to grayscale
+    img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2GRAY)
+    # Increase contrast with threshold
+    _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Optional: invert if digits are white on black
+    img = cv2.bitwise_not(img)
+    # Resize (improves recognition on small digits)
+    img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    return Image.fromarray(img)
 
 def payload_to_pixel_box(img, payload: str | dict):
     """
@@ -180,7 +201,8 @@ with ocr_tab:
             pil_img = None
 
         if pil_img:
-            st.image(pil_img, caption="Uploaded image preview", use_container_width=True)
+            with st.expander("Image preview", expanded=False):
+                st.image(pil_img, caption="Uploaded image preview", use_container_width=True)
 
             exif_dt = _parse_exif_dt(pil_img) or datetime.now()
             st.info(f"Timestamp: {exif_dt}")
@@ -220,6 +242,7 @@ with ocr_tab:
 
                 read_text = ""
                 if pytesseract:
+                    proc = preprocess_for_ocr(cropped_read)
                     read_text = pytesseract.image_to_string(cropped_read, config="--psm 7 digits").strip()
                     st.write("OCR (Reading):", read_text)
 
