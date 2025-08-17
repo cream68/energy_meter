@@ -208,7 +208,7 @@ with ocr_tab:
                 st.image(pil_img, caption="Uploaded image preview", use_container_width=True)
 
             exif_dt = _parse_exif_dt(pil_img) or datetime.now()
-            st.info(f"Timestamp: {exif_dt}")
+            st.success(f"Timestamp: {exif_dt}")
 
             # --- Crop Meter ID ---
             with st.expander("Step 1: Crop Meter ID area", expanded= not st.session_state.meter_id_found):
@@ -417,20 +417,52 @@ with chart_tab:
             end_d = st.date_input("End date", value=date.today(), min_value=min_d, max_value=date.today())
             end_dt = pd.Timestamp(end_d) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
+        # Toggle: Interpolate first value
+        interpolate_first = st.checkbox("Interpolate first value at start date", value=False)
+
         if start_d <= end_d:
             mask = (df["timestamp"] >= pd.Timestamp(start_d)) & (df["timestamp"] <= pd.Timestamp(end_dt))
             dfr = df.loc[mask].copy()
+
+            # Handle interpolation if selected
+            if interpolate_first and not dfr.empty:
+                # Find last reading before start_d
+                prev = df[df["timestamp"] < pd.Timestamp(start_d)].tail(1)
+                if not prev.empty:
+                    prev_row = prev.iloc[0]
+                    first_row = dfr.iloc[0]
+
+                    # Linear interpolation of reading at start_d
+                    delta_t = (first_row["timestamp"] - prev_row["timestamp"]).total_seconds()
+                    delta_r = first_row["reading_kwh"] - prev_row["reading_kwh"]
+                    rate = delta_r / delta_t if delta_t > 0 else 0
+                    seconds_from_prev = (pd.Timestamp(start_d) - prev_row["timestamp"]).total_seconds()
+                    interpolated_value = prev_row["reading_kwh"] + rate * seconds_from_prev
+
+                    # Insert synthetic row
+                    synthetic = first_row.copy()
+                    synthetic["timestamp"] = pd.Timestamp(start_d)
+                    synthetic["reading_kwh"] = interpolated_value
+                    synthetic["image_path"] = (
+                        f"Interpolated between {prev_row['timestamp'].date()} "
+                        f"({prev_row['reading_kwh']}) and {first_row['timestamp'].date()} "
+                        f"({first_row['reading_kwh']})"
+                    )
+                    dfr = pd.concat([pd.DataFrame([synthetic]), dfr], ignore_index=True)
+                    dfr = dfr.sort_values("timestamp").reset_index(drop=True)
+
             if len(dfr) >= 2:
                 dfr["usage_kwh"] = dfr["reading_kwh"].diff()
                 dfr["usage_kwh_sum"] = dfr["usage_kwh"].cumsum()
                 # ensure first row is zero instead of NaN
                 dfr.loc[dfr.index[0], "usage_kwh"] = 0
                 dfr.loc[dfr.index[0], "usage_kwh_sum"] = 0
+
                 with st.expander("Datensatz", expanded=False):
                     cols = list(range(0, 4)) + [-2, -1]
                     st.dataframe(dfr.iloc[:, cols])
-                col1, col2 = st.columns(2)
 
+                col1, col2 = st.columns(2)
                 total_usage = dfr["usage_kwh"].sum()
                 min_d = dfr["timestamp"].min()
                 max_d = dfr["timestamp"].max()
@@ -441,16 +473,18 @@ with chart_tab:
                     st.metric("Total usage (selected)", f"{total_usage:.2f} kWh")
                 with col2:
                     st.metric("Avg monthly usage", f"{avg_monthly_usage:.2f} kWh")
+
+                # --- Plot ---
                 fig = go.Figure()
 
-                # Bars for interval usage
+                # Step line for usage
                 fig.add_trace(go.Scatter(
                     x=dfr["timestamp"],
                     y=dfr["usage_kwh"],
                     name="Usage (kWh per interval)",
-                    marker_color="blue",
-                    opacity=0.6,
-                    line=dict(color="blue", width=2, shape="hv"),  # step line
+                    mode="lines+markers",
+                    line=dict(color="blue", width=2, shape="hv"),
+                    hovertemplate="Usage: %{y:.0f} kWh",
                 ))
 
                 # Line for cumulative usage
@@ -459,22 +493,22 @@ with chart_tab:
                     y=dfr["usage_kwh_sum"],
                     name="Cumulative Usage (kWh)",
                     mode="lines+markers",
-                    line=dict(color="red", width=2)
+                    line=dict(color="red", width=2),
+                    hovertemplate="Usage: %{y:.0f} kWh",
                 ))
 
                 fig.update_layout(
                     title="Energy Usage & Cumulative Usage",
                     xaxis_title="Timestamp",
                     yaxis_title="kWh",
-                    barmode="overlay",
-                    hovermode="x unified",  # shared hover label
+                    hovermode="x unified",
                     legend=dict(
-                        orientation="h",      # horizontal
+                        orientation="h",
                         yanchor="bottom",
                         y=1.02,
                         xanchor="center",
                         x=0.5,
-                        bgcolor="rgba(0,0,0,0)"  # transparent background
+                        bgcolor="rgba(0,0,0,0)"
                     )
                 )
                 st.plotly_chart(fig, use_container_width=True)
