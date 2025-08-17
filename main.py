@@ -69,6 +69,7 @@ def _image_bytes_hash(file_bytes: bytes) -> str:
 
 def exif_rgb(img):
     # Use EXIF-corrected orientation everywhere
+    
     return ImageOps.exif_transpose(img.convert("RGB"))
 
 def _extract_box_fields(d: dict):
@@ -188,6 +189,8 @@ with st.sidebar:
 chart_tab, database_tab, edit_tab, ocr_tab = st.tabs(["Usage & Charts", "Database", "Edit Database", "Crop & OCR"])
 
 with ocr_tab:
+    if "meter_id_found" not in st.session_state:
+        st.session_state.meter_id_found = False
     if uploaded:
         file_bytes = uploaded.read()
         img_hash = _image_bytes_hash(file_bytes)
@@ -208,81 +211,98 @@ with ocr_tab:
             st.info(f"Timestamp: {exif_dt}")
 
             # --- Crop Meter ID ---
-            st.subheader("Step 1: Crop Meter ID area")
-            id_box = st_cropper(pil_img, box_color="red", aspect_ratio=None,
-                                return_type="box", key="id_crop")
+            with st.expander("Step 1: Crop Meter ID area", expanded= not st.session_state.meter_id_found):
+                id_box = st_cropper(pil_img, box_color="red", aspect_ratio=None,
+                                    return_type="box", key="id_crop")
 
-            id_payload, id_ok = "", False
-            if id_box:
-                box = payload_to_pixel_box(pil_img, id_box)
-                cropped_id = pil_img.crop(box)
-                st.image(cropped_id, caption="Cropped Meter ID")
+                id_payload, id_ok = "", False
+                if id_box:
+                    box = payload_to_pixel_box(pil_img, id_box)
+                    cropped_id = pil_img.crop(box)
+                    st.image(cropped_id, caption="Cropped Meter ID")
 
-                if pytesseract:
-                    id_text = pytesseract.image_to_string(cropped_id, config="--psm 7 digits").strip()
-                    st.write("OCR (ID):", id_text)
-                    if METER_ID in "".join(ch for ch in id_text if ch.isdigit()):
-                        st.success(f"Meter ID {METER_ID} verified.")
-                        id_ok = True
-                    else:
-                        st.warning("Meter ID not matched, but you can continue.")
+                    if pytesseract:
+                        id_text = pytesseract.image_to_string(cropped_id, config="--psm 7 digits").strip()
+                        st.write("OCR (ID):", id_text)
+                        meter_id_found = METER_ID in "".join(ch for ch in id_text if ch.isdigit())
+                        if meter_id_found:
+                            id_ok = True
+                            st.session_state.meter_id_found = True
+                        else:
+                            st.warning("Meter ID not matched, but you can continue.")
 
-                id_payload = json.dumps(to_norm_payload(id_box, pil_img.width, pil_img.height))
+                    id_payload = json.dumps(to_norm_payload(id_box, pil_img.width, pil_img.height))
+            if st.session_state.meter_id_found:
+                st.success(f"Meter ID {METER_ID} verified.")
+                # --- Crop Reading ---
+            with st.expander("Step 2: Crop Meter ID area", expanded= st.session_state.meter_id_found):
+                read_box = st_cropper(pil_img, box_color="blue", aspect_ratio=None,
+                                    return_type="box", key="reading_crop")
 
-            # --- Crop Reading ---
-            st.subheader("Step 2: Crop Reading digits area")
-            read_box = st_cropper(pil_img, box_color="blue", aspect_ratio=None,
-                                  return_type="box", key="reading_crop")
+                manual_value, reading_payload = "", ""
+                if read_box:
+                    box = payload_to_pixel_box(pil_img, read_box)
+                    cropped_read = pil_img.crop(box)
+                    st.image(cropped_read, caption="Cropped Reading")
 
-            manual_value, reading_payload = "", ""
-            if read_box:
-                box = payload_to_pixel_box(pil_img, read_box)
-                cropped_read = pil_img.crop(box)
-                st.image(cropped_read, caption="Cropped Reading")
+                    read_text = ""
+                    if pytesseract:
+                        proc = preprocess_for_ocr(cropped_read)
+                        read_text = pytesseract.image_to_string(cropped_read, config="--psm 7 digits").strip()
+                        st.write("OCR (Reading):", read_text)
 
-                read_text = ""
-                if pytesseract:
-                    proc = preprocess_for_ocr(cropped_read)
-                    read_text = pytesseract.image_to_string(cropped_read, config="--psm 7 digits").strip()
-                    st.write("OCR (Reading):", read_text)
-
-                manual_value = st.text_input("Enter/correct meter reading (kWh)", value=read_text)
-                reading_payload = json.dumps(to_norm_payload(read_box, pil_img.width, pil_img.height))
-
-            # --- Save ---
-            if save_button and manual_value:
-                try:
-                    reading_val = float(manual_value)
-                except ValueError:
-                    st.error("Invalid manual value.")
-                    reading_val = None
-
-                if reading_val is not None:
-                    safe_date = exif_dt.strftime("%Y-%m-%d_%H%M%S")
-                    dest_name = f"{safe_date}_{METER_ID}.jpg"
-                    dest_path = os.path.join(IMAGE_DIR, dest_name)
-                    pil_img.save(dest_path, "JPEG", quality=92)
-
+                    # Get last reading before current timestamp
                     df = _load_db()
-                    if not (
-                        ((df["meter_id"] == METER_ID) & (df["timestamp"] == pd.Timestamp(exif_dt))).any()
-                        or (df["image_hash"] == img_hash).any()
-                    ):
-                        new_row = {
-                            "timestamp": exif_dt,
-                            "meter_id": METER_ID,
-                            "reading_kwh": reading_val,
-                            "image_path": dest_path,
-                            "image_hash": img_hash,
-                            "source_filename": uploaded.name,
-                            "id_crop_box": id_payload,
-                            "reading_crop_box": reading_payload,
-                        }
-                        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                        _save_db(df)
-                        st.success(f"Saved reading: {reading_val} kWh at {exif_dt}")
-                    else:
-                        st.warning("Duplicate entry detected, skipping save.")
+                    prev_reading = None
+                    if not df.empty:
+                        df = df[df["meter_id"] == METER_ID].sort_values("timestamp")
+                        before = df[df["timestamp"] < exif_dt]
+                        if not before.empty:
+                            prev_row = before.iloc[-1]
+                            prev_reading = prev_row["reading_kwh"]
+                            prev_ts = prev_row["timestamp"]
+
+                    manual_value = st.text_input("Enter/correct meter reading (kWh)")
+                    # If we found a previous reading, display it
+                    if prev_reading is not None:
+                        st.caption(f"📖 Last recorded reading before {exif_dt.strftime('%Y-%m-%d %H:%M')} was **{prev_reading} kWh** at at {prev_ts.strftime('%Y-%m-%d %H:%M')}")
+
+                    reading_payload = json.dumps(to_norm_payload(read_box, pil_img.width, pil_img.height))
+
+                # --- Save ---
+                if save_button and manual_value:
+                    try:
+                        reading_val = float(manual_value)
+                    except ValueError:
+                        st.error("Invalid manual value.")
+                        reading_val = None
+
+                    if reading_val is not None:
+                        safe_date = exif_dt.strftime("%Y-%m-%d_%H%M%S")
+                        dest_name = f"{safe_date}_{METER_ID}.jpg"
+                        dest_path = os.path.join(IMAGE_DIR, dest_name)
+                        pil_img.save(dest_path, "JPEG", quality=92)
+
+                        df = _load_db()
+                        if not (
+                            ((df["meter_id"] == METER_ID) & (df["timestamp"] == pd.Timestamp(exif_dt))).any()
+                            or (df["image_hash"] == img_hash).any()
+                        ):
+                            new_row = {
+                                "timestamp": exif_dt,
+                                "meter_id": METER_ID,
+                                "reading_kwh": reading_val,
+                                "image_path": dest_path,
+                                "image_hash": img_hash,
+                                "source_filename": uploaded.name,
+                                "id_crop_box": id_payload,
+                                "reading_crop_box": reading_payload,
+                            }
+                            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                            _save_db(df)
+                            st.success(f"Saved reading: {reading_val} kWh at {exif_dt}")
+                        else:
+                            st.warning("Duplicate entry detected, skipping save.")
 
 with database_tab:
     st.subheader("Database")
