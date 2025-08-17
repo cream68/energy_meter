@@ -28,6 +28,7 @@ from PIL import Image, ExifTags, ImageOps
 import streamlit as st
 from streamlit_cropper import st_cropper
 import json
+from pathlib import Path
 
 # OCR
 try:
@@ -35,7 +36,7 @@ try:
 except Exception:
     pytesseract = None
 
-APP_TITLE = "Energy Meter Reader (Cropper)"
+APP_TITLE = "Energy Meter"
 DATA_DIR = "data"
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
 DB_PATH = os.path.join(DATA_DIR, "readings.csv")
@@ -266,9 +267,45 @@ with database_tab:
     if df.empty:
         st.info("No readings yet.")
     else:
-        cols = list(range(0, 4))
-        st.dataframe(df.iloc[:, cols], use_container_width=True)
-        st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), "readings.csv", "text/csv")
+        df_show = df.copy()
+
+        # keep only useful columns
+        cols = ["timestamp", "meter_id", "reading_kwh", "image_path"]
+        st.dataframe(df_show[cols], use_container_width=True)
+
+        st.download_button(
+            "Download CSV",
+            df.to_csv(index=False).encode("utf-8"),
+            "readings.csv",
+            "text/csv",
+        )
+
+        with st.expander("Bildvorschau", expanded=False):
+
+            # Select one row to preview the image
+            options = [f"{i}: {row['timestamp']} | {row['meter_id']} | {row['reading_kwh']} kWh"
+                    for i, row in df_show.iterrows()]
+            choice = st.selectbox("Preview image for row:", options)
+
+            if choice:
+                idx = int(choice.split(":")[0])
+                row = df_show.loc[idx]
+                img_path = row["image_path"]
+
+                if isinstance(img_path, str) and os.path.exists(img_path):
+                    # Preview
+                    st.image(img_path, caption=f"Image for {row['timestamp']}")
+
+                    # Download button
+                    with open(img_path, "rb") as f:
+                        st.download_button(
+                            label="📥 Download image",
+                            data=f,
+                            file_name=os.path.basename(img_path),
+                            mime="image/jpeg",
+                        )
+                else:
+                    st.warning("Image file not found.")
 
 with edit_tab:
     st.subheader("Edit or Remove Readings")
